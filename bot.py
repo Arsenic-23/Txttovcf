@@ -1,6 +1,18 @@
 import logging
 import os
 import vobject
+import sys
+import psutil
+
+def check_instance():
+    script_name = os.path.basename(__file__)
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        if script_name in proc.info['cmdline']:
+            if proc.pid != os.getpid():  # If another instance is found
+                print("Another instance is running. Exiting...")
+                sys.exit()
+
+check_instance()
 from telegram import Update
 from telegram.ext import (
     Application,

@@ -51,15 +51,42 @@ logger = logging.getLogger(__name__)
 # Global password variable
 PASSWORD = config.PASSWORD
 
+# Dictionary to store user authentication status
+authenticated_users = {}
+
 # Dictionary to store user file data temporarily
 user_data = {}
 
 # Conversation handler states
+WAITING_FOR_PASSWORD = 0
 WAITING_FOR_NAME = 1
 
 # Verify password
 def verify_password(password: str) -> bool:
     return password == PASSWORD
+
+# /start command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    if user_id in authenticated_users:
+        await update.message.reply_text("You're already verified! Send me a file, and I'll convert it into a vCard (.vcf) file.")
+    else:
+        await update.message.reply_text("Welcome! Please enter the password to access the bot:")
+        return WAITING_FOR_PASSWORD
+
+# Handle password input
+async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    input_password = update.message.text.strip()
+
+    if verify_password(input_password):
+        authenticated_users[user_id] = True
+        await update.message.reply_text("✅ Password verified! You can now use the bot.")
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("❌ Incorrect password. Please try again:")
+        return WAITING_FOR_PASSWORD
 
 # Convert file to VCF
 def convert_to_vcf(file_path: str, contact_name: str) -> str:
@@ -77,12 +104,14 @@ def convert_to_vcf(file_path: str, contact_name: str) -> str:
     
     return vcf_filename
 
-# /start command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! Send me a file, and I'll convert it into a vCard (.vcf) file. You can also provide a custom name for the contact.")
-
 # Handle file uploads
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    if user_id not in authenticated_users:
+        await update.message.reply_text("❌ You need to verify yourself first using /start.")
+        return
+
     document = update.message.document
     if not document:
         return
@@ -96,21 +125,26 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(file_path)
 
     # Store the file path temporarily
-    user_data[update.message.chat_id] = file_path
+    user_data[user_id] = file_path
 
     await update.message.reply_text("File received! Please send me a name for this contact.")
     return WAITING_FOR_NAME
 
 # Handle custom name input
 async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact_name = update.message.text.strip()
-    chat_id = update.message.chat_id
+    user_id = update.message.from_user.id
 
-    if chat_id not in user_data:
+    if user_id not in authenticated_users:
+        await update.message.reply_text("❌ You need to verify yourself first using /start.")
+        return ConversationHandler.END
+
+    contact_name = update.message.text.strip()
+
+    if user_id not in user_data:
         await update.message.reply_text("No file was uploaded. Please upload a file first.")
         return ConversationHandler.END
 
-    file_path = user_data.pop(chat_id)
+    file_path = user_data.pop(user_id)
     
     await update.message.reply_text(f"Converting file with name: {contact_name}...")
 
@@ -140,6 +174,12 @@ async def change_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # /verify command
 async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    if user_id not in authenticated_users:
+        await update.message.reply_text("❌ You need to verify yourself first using /start.")
+        return
+
     if context.args:
         input_pass = context.args[0]
         if verify_password(input_pass):
@@ -153,17 +193,18 @@ def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Document.ALL, handle_file)],
+        entry_points=[CommandHandler("start", start)],
         states={
+            WAITING_FOR_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password)],
             WAITING_FOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_name)],
         },
         fallbacks=[],
     )
 
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(conv_handler)
     app.add_handler(CommandHandler("changepassword", change_password))
     app.add_handler(CommandHandler("verify", verify))
-    app.add_handler(conv_handler)
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
     app.run_polling()
 

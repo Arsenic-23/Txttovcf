@@ -61,7 +61,7 @@ check_instance()
 def keep_alive():
     while True:
         try:
-            requests.get("https://your-app-url.koyeb.app", timeout=5)  # Replace with your bot's URL
+            requests.get("https://gastric-shelba-arsenic-5a74517b.koyeb.app/", timeout=5)  # Replace with your bot's URL
             print("🔄 Keep-alive ping sent...")
         except Exception as e:
             print(f"⚠️ Keep-alive error: {e}")

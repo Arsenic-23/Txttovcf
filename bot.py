@@ -3,7 +3,6 @@ import os
 import time
 import threading
 import requests
-import vobject
 import sys
 import psutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -15,16 +14,18 @@ import config
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global variables
+# Global Variables
 PASSWORD = config.PASSWORD
+BOT_TOKEN = config.BOT_TOKEN
 KEEP_ALIVE_URL = config.KEEP_ALIVE_URL
 authorized_users = set()
 user_data = {}
 
-WAITING_FOR_NAME = 1
-WAITING_FOR_PASSWORD = 2
+WAITING_FOR_PASSWORD = 1
+WAITING_FOR_FILE = 2
+WAITING_FOR_NAME = 3
 
-# --- Dummy HTTP Server for Health Check ---
+# --- Dummy HTTP Server for Koyeb Health Check ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -51,8 +52,8 @@ def check_instance():
         try:
             cmdline = proc.info['cmdline']
             if cmdline and script_name in cmdline and proc.pid != current_pid:
-                print("⚠️ Another instance is running. Skipping duplicate launch.")
-                return
+                print("⚠️ Another instance is running. Exiting...")
+                sys.exit()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
 
@@ -66,23 +67,18 @@ def keep_alive():
             print("🔄 Keep-alive ping sent...")
         except Exception as e:
             print(f"⚠️ Keep-alive error: {e}")
-        time.sleep(300)  # Ping every 5 minutes
+        time.sleep(300)
 
 threading.Thread(target=keep_alive, daemon=True).start()
-
-# --- Restart on Crash ---
-def restart_bot():
-    print("🔄 Restarting bot...")
-    os.execv(sys.executable, ['python'] + sys.argv)
 
 # --- Bot Commands ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
     if user_id in authorized_users:
-        await update.message.reply_text("You're already authorized! Send me a file to convert.")
-        return
-    
+        await update.message.reply_text("✅ You're already verified! Send a .txt file with a phone number.")
+        return WAITING_FOR_FILE
+
     await update.message.reply_text("🔒 This bot is password-protected. Please enter the password:")
     return WAITING_FOR_PASSWORD
 
@@ -92,8 +88,8 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if input_password == PASSWORD:
         authorized_users.add(user_id)
-        await update.message.reply_text("✅ Password verified! You now have access.")
-        return ConversationHandler.END
+        await update.message.reply_text("✅ Password verified! Now, send me a .txt file containing a phone number.")
+        return WAITING_FOR_FILE
     else:
         await update.message.reply_text("❌ Incorrect password. Try again with /start.")
         return ConversationHandler.END
@@ -103,47 +99,53 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id not in authorized_users:
         await update.message.reply_text("❌ Unauthorized! Use /start and enter the password.")
-        return
+        return ConversationHandler.END
 
     document = update.message.document
-    if not document:
-        return
-
-    # Check file type
-    if not document.file_name.endswith(".vcf"):
-        await update.message.reply_text("⚠️ Only .vcf files are supported.")
-        return
+    if not document or not document.file_name.endswith(".txt"):
+        await update.message.reply_text("⚠️ Please upload a valid .txt file containing a phone number.")
+        return WAITING_FOR_FILE
 
     file = await document.get_file()
     file_path = f"{document.file_unique_id}_{document.file_name}"
     await file.download_to_drive(file_path)
 
-    user_data[user_id] = file_path  # Store per user instead of per chat
-    await update.message.reply_text("File received! Send a name for this contact.")
+    user_data[user_id] = file_path
+    await update.message.reply_text("✅ File received! Now, send a name for the contact.")
     return WAITING_FOR_NAME
 
 async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id not in authorized_users:
         await update.message.reply_text("❌ Unauthorized! Use /start and enter the password.")
-        return
+        return ConversationHandler.END
 
     contact_name = update.message.text.strip()
 
     if user_id not in user_data:
-        await update.message.reply_text("No file uploaded. Please upload a file first.")
+        await update.message.reply_text("⚠️ No file uploaded. Please send a .txt file first.")
         return ConversationHandler.END
 
     file_path = user_data.pop(user_id)
-    
-    await update.message.reply_text(f"Converting file: {contact_name}...")
+
+    # Read the text file content
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            phone_number = f.read().strip()
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error reading file: {e}")
+        return ConversationHandler.END
+
+    if not phone_number.isdigit():
+        await update.message.reply_text("⚠️ The file should contain a valid phone number.")
+        return ConversationHandler.END
 
     vcf_filename = f"{contact_name}.vcf"
     with open(vcf_filename, "w", encoding="utf-8") as vcf_file:
-        vcf_file.write(f"BEGIN:VCARD\nFN:{contact_name}\nEND:VCARD")
+        vcf_file.write(f"BEGIN:VCARD\nFN:{contact_name}\nTEL:{phone_number}\nEND:VCARD")
 
     with open(vcf_filename, "rb") as vcf_file:
-        await update.message.reply_document(document=vcf_file, filename=vcf_filename, caption="Converted file.")
+        await update.message.reply_document(document=vcf_file, filename=vcf_filename, caption="📂 Here is your converted VCF file!")
 
     os.remove(file_path)
     os.remove(vcf_filename)
@@ -159,21 +161,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /verify <password> - Verify password  
 
 📌 **How to Use:**  
-1️⃣ Send a file  
+1️⃣ Send a `.txt` file containing a phone number  
 2️⃣ Enter a contact name  
-3️⃣ Get the converted .vcf file!"""
+3️⃣ Get the converted `.vcf` file!"""
     
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 # --- Main Bot Function ---
 def main():
     try:
-        app = Application.builder().token(config.BOT_TOKEN).build()
+        app = Application.builder().token(BOT_TOKEN).build()
 
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler("start", start)],
             states={
                 WAITING_FOR_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password)],
+                WAITING_FOR_FILE: [MessageHandler(filters.Document.ALL, handle_file)],
                 WAITING_FOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_name)],
             },
             fallbacks=[],
@@ -181,7 +184,6 @@ def main():
 
         app.add_handler(conv_handler)
         app.add_handler(CommandHandler("help", help_command))
-        app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
         print("🚀 Bot is running...")
         app.run_polling()

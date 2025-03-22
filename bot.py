@@ -15,15 +15,16 @@ import config
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global password variable
+# Global variables
 PASSWORD = config.PASSWORD
+KEEP_ALIVE_URL = config.KEEP_ALIVE_URL
 authorized_users = set()
 user_data = {}
 
 WAITING_FOR_NAME = 1
 WAITING_FOR_PASSWORD = 2
 
-# --- Dummy HTTP Server for Koyeb Health Check ---
+# --- Dummy HTTP Server for Health Check ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -50,8 +51,8 @@ def check_instance():
         try:
             cmdline = proc.info['cmdline']
             if cmdline and script_name in cmdline and proc.pid != current_pid:
-                print("❌ Another instance is running. Exiting...")
-                sys.exit()
+                print("⚠️ Another instance is running. Skipping duplicate launch.")
+                return
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
 
@@ -61,7 +62,7 @@ check_instance()
 def keep_alive():
     while True:
         try:
-            requests.get("https://gastric-shelba-arsenic-5a74517b.koyeb.app/", timeout=5)  # Replace with your bot's URL
+            requests.get(KEEP_ALIVE_URL, timeout=5)
             print("🔄 Keep-alive ping sent...")
         except Exception as e:
             print(f"⚠️ Keep-alive error: {e}")
@@ -108,11 +109,16 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not document:
         return
 
+    # Check file type
+    if not document.file_name.endswith(".vcf"):
+        await update.message.reply_text("⚠️ Only .vcf files are supported.")
+        return
+
     file = await document.get_file()
     file_path = f"{document.file_unique_id}_{document.file_name}"
     await file.download_to_drive(file_path)
 
-    user_data[update.message.chat_id] = file_path
+    user_data[user_id] = file_path  # Store per user instead of per chat
     await update.message.reply_text("File received! Send a name for this contact.")
     return WAITING_FOR_NAME
 
@@ -123,13 +129,12 @@ async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     contact_name = update.message.text.strip()
-    chat_id = update.message.chat_id
 
-    if chat_id not in user_data:
+    if user_id not in user_data:
         await update.message.reply_text("No file uploaded. Please upload a file first.")
         return ConversationHandler.END
 
-    file_path = user_data.pop(chat_id)
+    file_path = user_data.pop(user_id)
     
     await update.message.reply_text(f"Converting file: {contact_name}...")
 

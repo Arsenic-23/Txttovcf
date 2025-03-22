@@ -23,7 +23,6 @@ user_data = {}
 
 WAITING_FOR_PASSWORD = 1
 WAITING_FOR_FILE = 2
-WAITING_FOR_NAME = 3
 
 # --- Dummy HTTP Server for Koyeb Health Check ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -76,7 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
     if user_id in authorized_users:
-        await update.message.reply_text("✅ You're already verified! Send a .txt file with a phone number.")
+        await update.message.reply_text("✅ You're already verified! Send a .txt file with contact details.")
         return WAITING_FOR_FILE
 
     await update.message.reply_text("🔒 This bot is password-protected. Please enter the password:")
@@ -88,7 +87,7 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if input_password == PASSWORD:
         authorized_users.add(user_id)
-        await update.message.reply_text("✅ Password verified! Now, send me a .txt file containing a phone number.")
+        await update.message.reply_text("✅ Password verified! Now, send me a .txt file containing contact details.")
         return WAITING_FOR_FILE
     else:
         await update.message.reply_text("❌ Incorrect password. Try again with /start.")
@@ -103,47 +102,43 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     document = update.message.document
     if not document or not document.file_name.endswith(".txt"):
-        await update.message.reply_text("⚠️ Please upload a valid .txt file containing a phone number.")
+        await update.message.reply_text("⚠️ Please upload a valid .txt file containing contact details.")
         return WAITING_FOR_FILE
 
     file = await document.get_file()
     file_path = f"{document.file_unique_id}_{document.file_name}"
     await file.download_to_drive(file_path)
 
-    user_data[user_id] = file_path
-    await update.message.reply_text("✅ File received! Now, send a name for the contact.")
-    return WAITING_FOR_NAME
-
-async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id not in authorized_users:
-        await update.message.reply_text("❌ Unauthorized! Use /start and enter the password.")
-        return ConversationHandler.END
-
-    contact_name = update.message.text.strip()
-
-    if user_id not in user_data:
-        await update.message.reply_text("⚠️ No file uploaded. Please send a .txt file first.")
-        return ConversationHandler.END
-
-    file_path = user_data.pop(user_id)
-
     # Read the text file content
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            phone_number = f.read().strip()
+            lines = [line.strip() for line in f.readlines() if line.strip()]
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error reading file: {e}")
         return ConversationHandler.END
 
-    if not phone_number.isdigit():
-        await update.message.reply_text("⚠️ The file should contain a valid phone number.")
+    if not lines:
+        await update.message.reply_text("⚠️ The file is empty. Please send a valid .txt file with contact details.")
         return ConversationHandler.END
 
-    vcf_filename = f"{contact_name}.vcf"
-    with open(vcf_filename, "w", encoding="utf-8") as vcf_file:
-        vcf_file.write(f"BEGIN:VCARD\nFN:{contact_name}\nTEL:{phone_number}\nEND:VCARD")
+    # Process the file content
+    contacts = []
+    for i, line in enumerate(lines, start=1):
+        parts = line.split(",", 1)  # Split into name and number if possible
+        if len(parts) == 2:
+            name, number = parts
+        else:
+            name, number = f"Name{i}", parts[0]  # Auto-generate name if missing
 
+        contacts.append((name.strip(), number.strip()))
+
+    # Generate the VCF file
+    vcf_filename = "contacts.vcf"
+    with open(vcf_filename, "w", encoding="utf-8") as vcf_file:
+        for name, number in contacts:
+            vcf_file.write(f"BEGIN:VCARD\nFN:{name}\nTEL:{number}\nEND:VCARD\n\n")
+
+    # Send the generated VCF file
     with open(vcf_filename, "rb") as vcf_file:
         await update.message.reply_document(document=vcf_file, filename=vcf_filename, caption="📂 Here is your converted VCF file!")
 
@@ -157,13 +152,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """🤖 **Bot Commands:**  
 /start - Start & enter password  
 /help - Show help  
-/changepassword <new_password> - Change password (Owner only)  
-/verify <password> - Verify password  
 
 📌 **How to Use:**  
-1️⃣ Send a `.txt` file containing a phone number  
-2️⃣ Enter a contact name  
-3️⃣ Get the converted `.vcf` file!"""
+1️⃣ Send a `.txt` file with contact details  
+   - Format: `Name,Number` (e.g., `John Doe, +1234567890`)  
+   - If only numbers are provided, names like `Name1`, `Name2` will be assigned automatically  
+2️⃣ Get the converted `.vcf` file!"""
     
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -177,7 +171,6 @@ def main():
             states={
                 WAITING_FOR_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password)],
                 WAITING_FOR_FILE: [MessageHandler(filters.Document.ALL, handle_file)],
-                WAITING_FOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_name)],
             },
             fallbacks=[],
         )

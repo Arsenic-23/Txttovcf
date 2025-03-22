@@ -18,8 +18,12 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
 def start_dummy_http_server():
-    server = HTTPServer(("0.0.0.0", 8080), HealthCheckHandler)
-    server.serve_forever()
+    try:
+        server = HTTPServer(("0.0.0.0", 8080), HealthCheckHandler)
+        print("Dummy HTTP server running on port 8080...")
+        server.serve_forever()
+    except Exception as e:
+        print(f"Error starting dummy server: {e}")
 
 # Run HTTP server in a separate thread (so it doesn’t block the bot)
 threading.Thread(target=start_dummy_http_server, daemon=True).start()
@@ -27,11 +31,16 @@ threading.Thread(target=start_dummy_http_server, daemon=True).start()
 # Prevent multiple instances
 def check_instance():
     script_name = os.path.basename(__file__)
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        if script_name in proc.info['cmdline']:
-            if proc.pid != os.getpid():
+    current_pid = os.getpid()
+
+    for proc in psutil.process_iter(['pid', 'cmdline']):
+        try:
+            cmdline = proc.info['cmdline']
+            if cmdline and script_name in cmdline and proc.pid != current_pid:
                 print("Another instance is running. Exiting...")
                 sys.exit()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
 
 check_instance()
 
@@ -49,7 +58,7 @@ def verify_password(password: str) -> bool:
 # Convert file to VCF
 def convert_to_vcf(file_path: str, contact_name: str = "Unknown") -> str:
     try:
-        with open(file_path, "rb") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             contact = vobject.readOne(f)
     except Exception:
         contact = vobject.vCard()
@@ -58,7 +67,7 @@ def convert_to_vcf(file_path: str, contact_name: str = "Unknown") -> str:
         contact.add("fn").value = contact_name
 
     vcf_filename = f"{contact.fn.value}.vcf"
-    with open(vcf_filename, "w") as vcf_file:
+    with open(vcf_filename, "w", encoding="utf-8") as vcf_file:
         vcf_file.write(contact.serialize())
     
     return vcf_filename
@@ -73,7 +82,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not document:
         return
 
-    if document.mime_type and document.mime_type.startswith("text/vcard"):
+    if document.mime_type and "vcard" in document.mime_type.lower():
         await update.message.reply_text("This file is already a VCF!")
         return
 

@@ -50,30 +50,29 @@ logger = logging.getLogger(__name__)
 
 # Global password variable
 PASSWORD = config.PASSWORD
-
-# Dictionary to store user authentication status
-authenticated_users = {}
+authorized_users = set()  # Store authorized user IDs
 
 # Dictionary to store user file data temporarily
 user_data = {}
 
 # Conversation handler states
-WAITING_FOR_PASSWORD = 0
 WAITING_FOR_NAME = 1
+WAITING_FOR_PASSWORD = 2
 
 # Verify password
 def verify_password(password: str) -> bool:
     return password == PASSWORD
 
-# /start command
+# /start command - Ask for password
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
-    if user_id in authenticated_users:
-        await update.message.reply_text("You're already verified! Send me a file, and I'll convert it into a vCard (.vcf) file.")
-    else:
-        await update.message.reply_text("Welcome! Please enter the password to access the bot:")
-        return WAITING_FOR_PASSWORD
+    if user_id in authorized_users:
+        await update.message.reply_text("You're already authorized! Send me a file to convert.")
+        return
+    
+    await update.message.reply_text("🔒 This bot is password-protected. Please enter the password:")
+    return WAITING_FOR_PASSWORD
 
 # Handle password input
 async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -81,12 +80,12 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     input_password = update.message.text.strip()
 
     if verify_password(input_password):
-        authenticated_users[user_id] = True
-        await update.message.reply_text("✅ Password verified! You can now use the bot.")
+        authorized_users.add(user_id)
+        await update.message.reply_text("✅ Password verified! You now have access to the bot's features.")
         return ConversationHandler.END
     else:
-        await update.message.reply_text("❌ Incorrect password. Please try again:")
-        return WAITING_FOR_PASSWORD
+        await update.message.reply_text("❌ Incorrect password. Please try again by sending /start.")
+        return ConversationHandler.END
 
 # Convert file to VCF
 def convert_to_vcf(file_path: str, contact_name: str) -> str:
@@ -107,9 +106,8 @@ def convert_to_vcf(file_path: str, contact_name: str) -> str:
 # Handle file uploads
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-
-    if user_id not in authenticated_users:
-        await update.message.reply_text("❌ You need to verify yourself first using /start.")
+    if user_id not in authorized_users:
+        await update.message.reply_text("❌ You are not authorized. Please use /start and enter the correct password.")
         return
 
     document = update.message.document
@@ -124,27 +122,25 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_path = f"{document.file_unique_id}_{document.file_name}"
     await file.download_to_drive(file_path)
 
-    # Store the file path temporarily
-    user_data[user_id] = file_path
-
+    user_data[update.message.chat_id] = file_path
     await update.message.reply_text("File received! Please send me a name for this contact.")
     return WAITING_FOR_NAME
 
 # Handle custom name input
 async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-
-    if user_id not in authenticated_users:
-        await update.message.reply_text("❌ You need to verify yourself first using /start.")
-        return ConversationHandler.END
+    if user_id not in authorized_users:
+        await update.message.reply_text("❌ You are not authorized. Please use /start and enter the correct password.")
+        return
 
     contact_name = update.message.text.strip()
+    chat_id = update.message.chat_id
 
-    if user_id not in user_data:
+    if chat_id not in user_data:
         await update.message.reply_text("No file was uploaded. Please upload a file first.")
         return ConversationHandler.END
 
-    file_path = user_data.pop(user_id)
+    file_path = user_data.pop(chat_id)
     
     await update.message.reply_text(f"Converting file with name: {contact_name}...")
 
@@ -161,7 +157,7 @@ async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /changepassword command
 async def change_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != config.OWNER_ID:
-        await update.message.reply_text("You are not authorized to change the password.")
+        await update.message.reply_text("❌ You are not authorized to change the password.")
         return
 
     if len(context.args) != 1:
@@ -170,25 +166,38 @@ async def change_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     global PASSWORD
     PASSWORD = context.args[0]
-    await update.message.reply_text("Password changed successfully!")
+    await update.message.reply_text("✅ Password changed successfully!")
 
 # /verify command
 async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-
-    if user_id not in authenticated_users:
-        await update.message.reply_text("❌ You need to verify yourself first using /start.")
-        return
-
     if context.args:
         input_pass = context.args[0]
         if verify_password(input_pass):
-            await update.message.reply_text("Password verified successfully!")
+            await update.message.reply_text("✅ Password verified successfully!")
         else:
-            await update.message.reply_text("Incorrect password.")
+            await update.message.reply_text("❌ Incorrect password.")
     else:
         await update.message.reply_text("Usage: /verify <password>")
 
+# /help command
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """🤖 **Bot Commands:**
+    
+/start - Start the bot & enter password  
+/help - Show this help message  
+/changepassword <new_password> - Change bot password (Owner only)  
+/verify <password> - Verify a password  
+
+**How to Use:**  
+1️⃣ Send a file to the bot.  
+2️⃣ Enter a name for the contact.  
+3️⃣ The bot will return a .vcf file with the given name.  
+
+🔒 **Note:** This bot is password-protected. You must enter the correct password using /start before using any features."""
+    
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+# Main function
 def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
 
@@ -202,6 +211,7 @@ def main():
     )
 
     app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("changepassword", change_password))
     app.add_handler(CommandHandler("verify", verify))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))

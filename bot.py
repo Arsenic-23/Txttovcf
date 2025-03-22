@@ -3,26 +3,9 @@ import os
 import vobject
 import sys
 import psutil
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import config
-
-# Health check server class
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-def start_health_check_server():
-    server = HTTPServer(("0.0.0.0", 8080), HealthCheckHandler)
-    server.serve_forever()
-
-# Start health check server in a separate thread
-threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # Prevent multiple instances
 def check_instance():

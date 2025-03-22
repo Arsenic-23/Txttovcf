@@ -6,7 +6,7 @@ import psutil
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 import config
 
 # Dummy HTTP Server for Koyeb Health Check
@@ -25,7 +25,7 @@ def start_dummy_http_server():
     except Exception as e:
         print(f"Error starting dummy server: {e}")
 
-# Run HTTP server in a separate thread (so it doesn’t block the bot)
+# Run HTTP server in a separate thread
 threading.Thread(target=start_dummy_http_server, daemon=True).start()
 
 # Prevent multiple instances
@@ -51,22 +51,27 @@ logger = logging.getLogger(__name__)
 # Global password variable
 PASSWORD = config.PASSWORD
 
+# Dictionary to store user file data temporarily
+user_data = {}
+
+# Conversation handler states
+WAITING_FOR_NAME = 1
+
 # Verify password
 def verify_password(password: str) -> bool:
     return password == PASSWORD
 
 # Convert file to VCF
-def convert_to_vcf(file_path: str, contact_name: str = "Unknown") -> str:
+def convert_to_vcf(file_path: str, contact_name: str) -> str:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             contact = vobject.readOne(f)
     except Exception:
         contact = vobject.vCard()
     
-    if not hasattr(contact, "fn") or not getattr(contact.fn, "value", None):
-        contact.add("fn").value = contact_name
+    contact.add("fn").value = contact_name
+    vcf_filename = f"{contact_name}.vcf"
 
-    vcf_filename = f"{contact.fn.value}.vcf"
     with open(vcf_filename, "w", encoding="utf-8") as vcf_file:
         vcf_file.write(contact.serialize())
     
@@ -74,7 +79,7 @@ def convert_to_vcf(file_path: str, contact_name: str = "Unknown") -> str:
 
 # /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! Send me a file, and I'll convert it into a vCard (.vcf) file.")
+    await update.message.reply_text("Hello! Send me a file, and I'll convert it into a vCard (.vcf) file. You can also provide a custom name for the contact.")
 
 # Handle file uploads
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,9 +94,25 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await document.get_file()
     file_path = f"{document.file_unique_id}_{document.file_name}"
     await file.download_to_drive(file_path)
+
+    # Store the file path temporarily
+    user_data[update.message.chat_id] = file_path
+
+    await update.message.reply_text("File received! Please send me a name for this contact.")
+    return WAITING_FOR_NAME
+
+# Handle custom name input
+async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contact_name = update.message.text.strip()
+    chat_id = update.message.chat_id
+
+    if chat_id not in user_data:
+        await update.message.reply_text("No file was uploaded. Please upload a file first.")
+        return ConversationHandler.END
+
+    file_path = user_data.pop(chat_id)
     
-    contact_name = "Unknown"
-    await update.message.reply_text(f"File received: {document.file_name}. Converting...")
+    await update.message.reply_text(f"Converting file with name: {contact_name}...")
 
     vcf_filename = convert_to_vcf(file_path, contact_name)
 
@@ -100,6 +121,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     os.remove(file_path)
     os.remove(vcf_filename)
+
+    return ConversationHandler.END
 
 # /changepassword command
 async def change_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -129,10 +152,18 @@ async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
 
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Document.ALL, handle_file)],
+        states={
+            WAITING_FOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_name)],
+        },
+        fallbacks=[],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("changepassword", change_password))
     app.add_handler(CommandHandler("verify", verify))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    app.add_handler(conv_handler)
 
     app.run_polling()
 

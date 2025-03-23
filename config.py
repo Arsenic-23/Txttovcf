@@ -1,7 +1,7 @@
 import os
 
 # Bot Configuration
-BOT_TOKEN = "7322155012:AAFsPRbLcnYqGJWbPazo2sABM79WBDIsjY8"  # Your bot token
+BOT_TOKEN = "7627624375:AAGbZYwbB9ATZsQt1SeGXrAqoSAlPhY2WEQ"  # Your bot token
 OWNER_ID = 7212032106  # Your Telegram User ID
 
 # Password System

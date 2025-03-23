@@ -1,7 +1,6 @@
-python-telegram-bot[v20]==20.3
-vobject==0.9.6.1
-pytz
-psutil
-Flask
-requests
-
+python-telegram-bot==20.3  # Ensure v20 is used
+vobject==0.9.6.1  # For VCF file handling
+pytz  # Timezone support
+psutil  # System monitoring
+Flask  # Lightweight web framework
+requests  # HTTP requests handling

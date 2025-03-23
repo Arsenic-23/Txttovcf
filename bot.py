@@ -4,11 +4,9 @@ import time
 import threading
 import requests
 import sys
-import psutil
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update, Contact
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 import config
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 
 # Logging setup
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -18,105 +16,76 @@ logger = logging.getLogger(__name__)
 PASSWORD = config.PASSWORD
 BOT_TOKEN = config.BOT_TOKEN
 KEEP_ALIVE_URL = config.KEEP_ALIVE_URL
-OWNER_ID = config.OWNER_ID
 authorized_users = set()
-contact_counter = 1  # Keeps track of numbered contacts
 user_data = {}
 
 WAITING_FOR_PASSWORD = 1
 WAITING_FOR_FILE = 2
 WAITING_FOR_VCF_NAME = 3
 
-# --- Contact Handling ---
-async def handle_contact(update: Update, context: CallbackContext):
-    global contact_counter
-    contact = update.message.contact
-    
-    # Check if the contact already has a name
-    contact_name = contact.first_name if contact.first_name else None
-
-    if not contact_name:
-        await update.message.reply_text("This contact has no name. Please enter a name:")
-        user_data[update.message.chat_id] = {"contact": contact, "step": WAITING_FOR_VCF_NAME}
-        return
-
-    # Save the contact
-    contact_filename = f"{contact_name}{contact_counter}.vcf"
-    contact_counter += 1
-
-    vcf_content = f"BEGIN:VCARD\nVERSION:3.0\nFN:{contact_name}\nTEL:{contact.phone_number}\nEND:VCARD"
-    
-    with open(contact_filename, "w") as vcf_file:
-        vcf_file.write(vcf_content)
-
-    await update.message.reply_text(f"Saved contact as {contact_filename}")
-
-# --- Handle User Response for Missing Contact Name ---
-async def handle_text(update: Update, context: CallbackContext):
-    chat_id = update.message.chat_id
-
-    if chat_id in user_data and user_data[chat_id].get("step") == WAITING_FOR_VCF_NAME:
-        contact = user_data[chat_id]["contact"]
-        contact_name = update.message.text.strip()
-        
-        # Save the contact
-        contact_filename = f"{contact_name}{contact_counter}.vcf"
-        contact_counter += 1
-
-        vcf_content = f"BEGIN:VCARD\nVERSION:3.0\nFN:{contact_name}\nTEL:{contact.phone_number}\nEND:VCARD"
-        
-        with open(contact_filename, "w") as vcf_file:
-            vcf_file.write(vcf_content)
-
-        await update.message.reply_text(f"Saved contact as {contact_filename}")
-
-        del user_data[chat_id]  # Remove from tracking
-
-# --- Password System ---
-async def change_password(update: Update, context: CallbackContext):
-    if update.message.chat_id != OWNER_ID:
-        await update.message.reply_text("You are not authorized to change the password.")
-        return
-
-    if len(context.args) == 0:
-        await update.message.reply_text("Usage: /changepassword <new_password>")
-        return
-
-    new_password = context.args[0]
-    global PASSWORD
-    PASSWORD = new_password
-
-    await update.message.reply_text("✅ Password has been successfully changed!")
-
-# --- Auto Restart on Internet Connection ---
-def ensure_online():
+# Ensure bot auto-reconnects when phone is online
+def keep_bot_alive():
     while True:
         try:
-            response = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getMe")
+            response = requests.get(KEEP_ALIVE_URL)
             if response.status_code == 200:
-                print("✅ Bot is online!")
-            else:
-                print("⚠️ Bot is offline. Restarting...")
-                os.system("python bot.py &")
-        except:
-            print("⚠️ No internet. Retrying...")
-        time.sleep(30)
+                logger.info("Bot is active.")
+        except Exception as e:
+            logger.error(f"Error in keep-alive check: {e}")
+        time.sleep(600)  # Ping every 10 minutes
 
-# --- Start Command ---
+# Function to start the bot
 async def start(update: Update, context: CallbackContext):
-    await update.message.reply_text("Welcome! Send a contact to save it.")
+    user = update.effective_user
+    await update.message.reply_text(f"👋 Hello {user.first_name}! Welcome to the bot.\n\n🔑 Please enter the password to continue.")
 
-# --- Setup Bot ---
+# Password Verification
+async def enter_password(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    password_attempt = update.message.text.strip()
+
+    if password_attempt == PASSWORD:
+        authorized_users.add(user_id)
+        await update.message.reply_text("✅ Password correct! You can now use the bot.")
+    else:
+        await update.message.reply_text("❌ Incorrect password. Try again.")
+
+# Function to change password (Owner Only)
+async def change_password(update: Update, context: CallbackContext):
+    if update.effective_user.id != config.OWNER_ID:
+        await update.message.reply_text("❌ You are not authorized to change the password.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /changepassword <new_password>")
+        return
+
+    new_password = " ".join(context.args)
+    with open("password.txt", "w") as f:
+        f.write(new_password)
+
+    global PASSWORD
+    PASSWORD = new_password
+    await update.message.reply_text(f"✅ Password changed successfully! New Password: `{new_password}`")
+
+# Auto-reconnect feature
+def auto_restart():
+    while True:
+        os.system("python bot.py")
+        time.sleep(10)
+
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # Registering handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("changepassword", change_password, pass_args=True))
-    application.add_handler(MessageHandler(filters.CONTACT, handle_contact))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    application.add_handler(CommandHandler("changepassword", change_password))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, enter_password))
 
-    threading.Thread(target=ensure_online, daemon=True).start()
-    
+    # Start auto-reconnect in a separate thread
+    threading.Thread(target=keep_bot_alive, daemon=True).start()
+    threading.Thread(target=auto_restart, daemon=True).start()
+
     application.run_polling()
 
 if __name__ == "__main__":

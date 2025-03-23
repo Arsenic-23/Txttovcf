@@ -6,8 +6,8 @@ import requests
 import sys
 import psutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
+from telegram import Update, Contact
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 import config
 
 # Logging setup
@@ -18,179 +18,106 @@ logger = logging.getLogger(__name__)
 PASSWORD = config.PASSWORD
 BOT_TOKEN = config.BOT_TOKEN
 KEEP_ALIVE_URL = config.KEEP_ALIVE_URL
+OWNER_ID = config.OWNER_ID
 authorized_users = set()
+contact_counter = 1  # Keeps track of numbered contacts
 user_data = {}
 
 WAITING_FOR_PASSWORD = 1
 WAITING_FOR_FILE = 2
 WAITING_FOR_VCF_NAME = 3
 
-# --- Dummy HTTP Server for Health Check ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
+# --- Contact Handling ---
+async def handle_contact(update: Update, context: CallbackContext):
+    global contact_counter
+    contact = update.message.contact
+    
+    # Check if the contact already has a name
+    contact_name = contact.first_name if contact.first_name else None
 
-def start_dummy_http_server():
-    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", 8080), HealthCheckHandler).serve_forever(), daemon=True).start()
+    if not contact_name:
+        await update.message.reply_text("This contact has no name. Please enter a name:")
+        user_data[update.message.chat_id] = {"contact": contact, "step": WAITING_FOR_VCF_NAME}
+        return
 
-start_dummy_http_server()
+    # Save the contact
+    contact_filename = f"{contact_name}{contact_counter}.vcf"
+    contact_counter += 1
 
-# --- Prevent Multiple Instances ---
-def check_instance():
-    script_name = os.path.basename(__file__)
-    current_pid = os.getpid()
-    for proc in psutil.process_iter(['pid', 'cmdline']):
-        try:
-            if proc.info['cmdline'] and script_name in proc.info['cmdline'] and proc.pid != current_pid:
-                sys.exit("⚠️ Another instance is running. Exiting...")
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
+    vcf_content = f"BEGIN:VCARD\nVERSION:3.0\nFN:{contact_name}\nTEL:{contact.phone_number}\nEND:VCARD"
+    
+    with open(contact_filename, "w") as vcf_file:
+        vcf_file.write(vcf_content)
 
-check_instance()
+    await update.message.reply_text(f"Saved contact as {contact_filename}")
 
-# --- Keep-Alive Function ---
-def keep_alive():
+# --- Handle User Response for Missing Contact Name ---
+async def handle_text(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+
+    if chat_id in user_data and user_data[chat_id].get("step") == WAITING_FOR_VCF_NAME:
+        contact = user_data[chat_id]["contact"]
+        contact_name = update.message.text.strip()
+        
+        # Save the contact
+        contact_filename = f"{contact_name}{contact_counter}.vcf"
+        contact_counter += 1
+
+        vcf_content = f"BEGIN:VCARD\nVERSION:3.0\nFN:{contact_name}\nTEL:{contact.phone_number}\nEND:VCARD"
+        
+        with open(contact_filename, "w") as vcf_file:
+            vcf_file.write(vcf_content)
+
+        await update.message.reply_text(f"Saved contact as {contact_filename}")
+
+        del user_data[chat_id]  # Remove from tracking
+
+# --- Password System ---
+async def change_password(update: Update, context: CallbackContext):
+    if update.message.chat_id != OWNER_ID:
+        await update.message.reply_text("You are not authorized to change the password.")
+        return
+
+    if len(context.args) == 0:
+        await update.message.reply_text("Usage: /changepassword <new_password>")
+        return
+
+    new_password = context.args[0]
+    global PASSWORD
+    PASSWORD = new_password
+
+    await update.message.reply_text("✅ Password has been successfully changed!")
+
+# --- Auto Restart on Internet Connection ---
+def ensure_online():
     while True:
         try:
-            requests.get(KEEP_ALIVE_URL, timeout=5)
-            print("🔄 Keep-alive ping sent...")
-        except Exception as e:
-            print(f"⚠️ Keep-alive error: {e}")
-        time.sleep(300)
+            response = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getMe")
+            if response.status_code == 200:
+                print("✅ Bot is online!")
+            else:
+                print("⚠️ Bot is offline. Restarting...")
+                os.system("python bot.py &")
+        except:
+            print("⚠️ No internet. Retrying...")
+        time.sleep(30)
 
-threading.Thread(target=keep_alive, daemon=True).start()
+# --- Start Command ---
+async def start(update: Update, context: CallbackContext):
+    await update.message.reply_text("Welcome! Send a contact to save it.")
 
-# --- Bot Commands ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id in authorized_users:
-        await update.message.reply_text("✅ You're already verified! Send a .txt file with contact details.")
-        return WAITING_FOR_FILE
-    await update.message.reply_text("🔒 This bot is password-protected. Please enter the password:")
-    return WAITING_FOR_PASSWORD
-
-async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if update.message.text.strip() == PASSWORD:
-        authorized_users.add(user_id)
-        await update.message.reply_text("✅ Password verified! Now, send me a .txt file containing contact details.")
-        return WAITING_FOR_FILE
-    await update.message.reply_text("❌ Incorrect password. Try again with /start.")
-    return ConversationHandler.END
-
-# --- File Handling ---
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id not in authorized_users:
-        await update.message.reply_text("❌ Unauthorized! Use /start and enter the password.")
-        return ConversationHandler.END
-
-    document = update.message.document
-    if not document or not document.file_name.endswith(".txt"):
-        await update.message.reply_text("⚠️ Please upload a valid .txt file containing contact details.")
-        return WAITING_FOR_FILE
-
-    file = await document.get_file()
-    file_path = f"{document.file_unique_id}_{document.file_name}"
-    await file.download_to_drive(file_path)
-
-    # Read and process the text file content
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            lines = [line.strip() for line in f.readlines() if line.strip()]
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Error reading file: {e}")
-        return ConversationHandler.END
-
-    if not lines:
-        await update.message.reply_text("⚠️ The file is empty. Please send a valid .txt file with contact details.")
-        return ConversationHandler.END
-
-    # Process contacts
-    contacts = []
-    for i, line in enumerate(lines, start=1):
-        parts = line.split(",", 1)  # Split into name and number if possible
-        if len(parts) == 2:
-            name, number = parts
-        else:
-            name, number = f"Name{i}", parts[0]  # Auto-generate name if missing
-        contacts.append((name.strip(), number.strip()))
-
-    # Store contacts and file path in user_data for later use
-    user_data[user_id] = {"contacts": contacts, "file_path": file_path}
-    
-    # Ask the user for a custom VCF filename
-    await update.message.reply_text("📁 Please enter a name for the VCF file (without extension):")
-    return WAITING_FOR_VCF_NAME
-
-async def handle_vcf_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id not in authorized_users or user_id not in user_data:
-        await update.message.reply_text("❌ Unauthorized or session expired! Please restart with /start.")
-        return ConversationHandler.END
-
-    # Get the filename from the user input
-    vcf_name = update.message.text.strip()
-    if not vcf_name:
-        vcf_name = "contacts"  # Default filename if user sends empty message
-    vcf_filename = f"{vcf_name}.vcf"
-
-    contacts = user_data[user_id]["contacts"]
-    file_path = user_data[user_id]["file_path"]
-    
-    # Generate the VCF file
-    with open(vcf_filename, "w", encoding="utf-8") as vcf_file:
-        for name, number in contacts:
-            vcf_file.write(f"BEGIN:VCARD\nFN:{name}\nTEL:{number}\nEND:VCARD\n\n")
-
-    # Send the generated VCF file
-    with open(vcf_filename, "rb") as vcf_file:
-        await update.message.reply_document(document=vcf_file, filename=vcf_filename, caption="📂 Here is your VCF file!")
-
-    # Clean up
-    os.remove(file_path)
-    os.remove(vcf_filename)
-    del user_data[user_id]
-
-    return ConversationHandler.END
-
-# --- /help command ---
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """🤖 **Bot Commands:**  
-/start - Start & enter password  
-/help - Show help  
-
-📌 **How to Use:**  
-1️⃣ Send a `.txt` file with contact details  
-   - Format: `Name,Number` (e.g., `John Doe, +1234567890`)  
-   - If only numbers are provided, names like `Name1`, `Name2` will be assigned automatically  
-2️⃣ Enter a **custom name** for the `.vcf` file  
-3️⃣ Get the `.vcf` file!"""
-    
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-# --- Main Bot Function ---
+# --- Setup Bot ---
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            WAITING_FOR_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password)],
-            WAITING_FOR_FILE: [MessageHandler(filters.Document.ALL, handle_file)],
-            WAITING_FOR_VCF_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_vcf_name)],
-        },
-        fallbacks=[],
-    )
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("changepassword", change_password, pass_args=True))
+    application.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("help", help_command))
-
-    print("🚀 Bot is running...")
-    app.run_polling()
+    threading.Thread(target=ensure_online, daemon=True).start()
+    
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
